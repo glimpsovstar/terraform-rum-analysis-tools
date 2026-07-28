@@ -1,6 +1,6 @@
 # TFC/TFE Support Design
 
-**Status:** Proposed  
+**Status:** Proposed (revised)  
 **Date:** 2026-07-28  
 **Repo:** `terraform-rum-analysis-tools`
 
@@ -20,205 +20,246 @@ This repo analyzes Terraform **Resources Under Management (RUM)** for a single w
 - Counts instances correctly for `count` / `for_each` (one row per instance).
 - Filters `terraform_data` / `null_resource` out of managed-resource counts (aligned with the documented `jq` check).
 - Optional HashiCorp resource focus (`tfe_*`, `vault_*`) via `-H` / `-Ho`.
-- CSV and aggregate reporting suitable for audits.
+- CSV and aggregate reporting suitable for audits at **one** workspace.
 
-### Gaps relative to TFC/TFE
+### Gaps relative to TFC/TFE (platform-scale RUM)
 
-1. **No remote state fetch.** Users with HCP Terraform (TFC) or Terraform Enterprise (TFE) must manually download state first (UI or API).
-2. **No auth / hostname model.** TFE needs a custom hostname; TFC defaults to `app.terraform.io`.
-3. **No workspace addressing.** Scripts do not accept org + workspace (or workspace ID).
-4. **Duplicated state loading.** Each script opens/parses JSON independently; adding a second source without a shared loader would triple the work and drift.
-5. **No tests or packaging.** No `requirements.txt`, shared module layout, or tests — remote I/O will need fixtures/mocks.
-6. **Docs only mention local files.** README and script help text do not describe TFC/TFE workflows.
-7. **Ephemeral-workspaces note is advisory only.** `temporary_intended_resources.py` mentions TFC ephemeral workspaces as a follow-on idea; that is product guidance, not integration.
+1. **No remote state fetch** from HCP Terraform / TFE.
+2. **No scope model** — cannot analyze an organization, a project, or choose a single workspace via API identity.
+3. **No rollup reports** — totals, per-provider, per-resource-type, and per-workspace breakdowns across many states.
+4. **No workspace discovery** — listing/pagination/`filter[project][id]` not implemented.
+5. **Duplicated state loading** across scripts; no shared inventory pipeline.
+6. **No tests/packaging** for remote I/O, concurrency, or partial-failure reporting.
+7. Docs describe local files only.
 
-### Non-goals for this design
+### Non-goals
 
 - Uploading or mutating remote state
-- Triggering plans/applies
-- Organization-wide billing/RUM dashboards (multi-workspace aggregation can be a later phase)
-- Parsing `terraform show -json` / `hosted-json-state-download-url` as the primary format (different schema than raw `.tfstate`)
-- Replacing the TFE provider / official Terraform CLI
+- Triggering plans/applies / cost estimation APIs
+- Replacing HCP Terraform’s own billing UI (this tool produces **inventory RUM**, not invoice reconciliation)
+- Using `hosted-json-state-download-url` as the primary schema (raw `.tfstate` remains canonical)
+- Auto-remediation of temporary resources (advisory scripts can remain separate)
 
 ## 2. Problem statement
 
-Operators who store state in TFC/TFE should be able to run the same RUM analysis against a workspace **without** a manual state download step, using a token and workspace identity.
+Platform operators need RUM analysis at the same granularity they manage TFC/TFE:
+
+| Scope | Question answered |
+|-------|-------------------|
+| **Workspace** | What is managed in this one workspace? |
+| **Project** | What is managed across workspaces in this project? |
+| **Organization** | What is managed across the org (optionally filtered)? |
+
+Reports must summarize **totals** and breakdowns (**per provider**, **per resource type**, **per workspace**, and for org scope **per project**), not only a flat resource dump.
+
+**Yes — this makes sense.** TFC/TFE already structure ownership as org → project → workspace; RUM reporting should follow that hierarchy. Single-workspace local-file analysis remains useful, but remote support should treat workspace as one scope option, not the only product.
 
 ## 3. Approaches considered
 
-### A. Thin download helper (CLI wrapper)
+### A. Thin per-workspace download helper only
 
-Add a script that downloads current state to a temp/local file, then invoke existing tools unchanged.
+Download one state, run existing scripts.
 
-- **Pros:** Minimal code change; easy to reason about.
-- **Cons:** Two-step UX; each analysis tool still unaware of TFC; temp file hygiene and secrets logging risk.
+- Good for debugging; insufficient for org/project RUM.
 
-### B. Shared state source + CLI flags on each tool (recommended)
+### B. Shared loader + remote flags on existing scripts only
 
-Introduce a small shared module that returns parsed state from either:
+Single-workspace remote fetch wired into current CLIs.
 
-- local file path, or
-- TFC/TFE API (resolve workspace → current state version → download raw state)
+- Necessary foundation; not sufficient alone for the requested scopes/reports.
 
-Wire the same flags/env vars into all three CLIs (or a thin common arg group).
+### C. Scoped inventory runner + report engine (recommended)
 
-- **Pros:** One fetch path; analysis logic stays pure; matches “single workspace” product framing; TFE hostname is first-class.
-- **Cons:** Touches all three entrypoints; needs requests/urllib and tests.
+1. **Discover** target workspaces for a scope (org / project / workspace).
+2. **Fetch** each workspace’s current raw state (with concurrency + partial failure tolerance).
+3. **Normalize** rows (org, project, workspace, provider, type, name, instance count).
+4. **Report** totals and breakdowns; export CSV/JSON.
 
-### C. Full TFC client / multi-workspace reporter
+Keep existing single-file scripts as thin local/workspace tools; add a primary `rum_report` (or extend the extractor) for scoped rollups.
 
-Build org/project listing, pagination, concurrency, aggregated RUM across many workspaces.
-
-- **Pros:** Powerful for platform teams.
-- **Cons:** Large scope; exceeds current “single workspace” tools; harder auth/permission stories.
-
-**Recommendation:** **Approach B**, with Approach A’s download-to-file available as an optional `--save-state` / standalone helper for debugging. Defer Approach C.
+**Recommendation:** **C built on B’s loader.** Implement discovery + reporting as first-class; do not defer org/project to a vague later phase.
 
 ## 4. Design
 
-### 4.1 Architecture
+### 4.1 Scope model
+
+Exactly one analysis scope per run:
+
+| Scope | Required identity | Discovery |
+|-------|-------------------|-----------|
+| `workspace` | `--organization` + `--workspace` **or** `--workspace-id` (+ optional local `-f` for offline) | None (single target) |
+| `project` | `--organization` + `--project` (name) or `--project-id` | List workspaces with `filter[project][id]` (paginated) |
+| `organization` | `--organization` | List all org workspaces (paginated); optional exclude tags / name filters later |
+
+Local `-f` remains a special case of workspace scope without API discovery.
+
+### 4.2 Architecture
 
 ```
-┌────────────────────────────┐
-│ CLI (extractor / stats /   │
-│ temporary)                 │
-└─────────────┬──────────────┘
-              │ resolve StateSource
-              ▼
-┌────────────────────────────┐
-│ state_source.py            │
-│  - from_file(path)         │
-│  - from_tfc(org, ws, …)    │
-└─────────────┬──────────────┘
-              │ HTTP (optional)
-              ▼
-┌────────────────────────────┐
-│ TFC/TFE API                │
-│ 1) GET workspace by name   │
-│ 2) GET current-state-ver   │
-│ 3) GET hosted-state URL    │
-└────────────────────────────┘
-              │
-              ▼
-        raw state JSON
-              │
-              ▼
-   existing extract/aggregate logic
+CLI: rum_report.py (primary)
+  scope = organization | project | workspace
+        │
+        ▼
+┌─────────────────────┐
+│ discover.py         │  list workspaces (paginate, project filter)
+└──────────┬──────────┘
+           │ [workspace refs]
+           ▼
+┌─────────────────────┐
+│ tfc_client.py       │  current-state-version → hosted-state-download-url
+└──────────┬──────────┘
+           │ raw state JSON (per workspace)
+           ▼
+┌─────────────────────┐
+│ inventory.py        │  extract managed instances → normalized rows
+└──────────┬──────────┘
+           │ DataFrame / row stream
+           ▼
+┌─────────────────────┐
+│ report.py           │  totals + breakdowns + exports
+└─────────────────────┘
 ```
 
-Analysis functions should accept **already-loaded** `dict` state (as `extract_resources(state_data, …)` already does in the main extractor). File/API concerns stay in the loader.
+Existing scripts can call `inventory.extract_from_state(state_data)` so local analysis and remote rollups share one counting definition.
 
-### 4.2 Remote fetch sequence
+### 4.3 Workspace discovery (API)
 
-Compatible with HCP Terraform and TFE (same API shape; hostname differs):
+- List: `GET /api/v2/organizations/{org}/workspaces?page[number]=&page[size]=100`
+- Project filter: `filter[project][id]=prj-...`
+- Resolve project name → id via Projects API when `--project` name is given
+- Include workspace attributes needed for reports: `id`, `name`, and project relationship (`project.id` / name when available)
+- Paginate until `meta.pagination.next-page` is null
 
-1. **Auth:** `Authorization: Bearer <token>`, `Content-Type: application/vnd.api+json`.
-2. **Resolve workspace** (if ID not provided):  
-   `GET /api/v2/organizations/{org}/workspaces/{name}`
-3. **Current state version:**  
-   `GET /api/v2/workspaces/{workspace_id}/current-state-version`
-4. **Download raw state:** follow `data.attributes.hosted-state-download-url`  
-   (requires auth on newer TFE versions; always send the token).
+### 4.4 State fetch
 
-Use **raw** state (`hosted-state-download-url`), not `hosted-json-state-download-url`, so existing parsers keep working without a second schema.
+Per workspace (same as prior design):
 
-### 4.3 Configuration surface
+1. `GET /api/v2/workspaces/{id}/current-state-version`
+2. Download `hosted-state-download-url` (raw state; send Bearer token)
+3. Parse JSON → inventory extractor
 
-| Input | Local | Remote |
-|-------|-------|--------|
-| State | `-f/--file` | omit file; pass org + workspace |
-| Org | n/a | `--organization` / `TFC_ORGANIZATION` |
-| Workspace | n/a | `--workspace` / `TFC_WORKSPACE` |
-| Workspace ID | n/a | `--workspace-id` (skips name lookup) |
-| Hostname | n/a | `--hostname` default `app.terraform.io`; env `TFE_HOSTNAME` |
-| Token | n/a | `--token` or env `TFE_TOKEN` (also accept `TF_TOKEN_<hostname_with_underscores>` later if useful) |
+**Partial failure policy:** a workspace with 404 (no state), 401/403, or corrupt JSON is recorded in an errors table and **does not fail the whole org/project run** (exit non-zero only if zero workspaces succeeded, or if `--strict` is set).
 
-Validation rules:
+**Concurrency:** bounded worker pool (default ~5–10) to avoid API throttling; configurable `--concurrency`.
 
-- Exactly one of: local file **or** remote workspace identity.
-- Remote requires token + (workspace ID **or** org+workspace name).
-- `--hide-tfe-vault` / analysis flags remain orthogonal to source.
+### 4.5 Normalized inventory row
 
-### 4.4 Dependencies
+Every managed instance becomes one row:
 
-- Prefer **stdlib `urllib`** for the MVP to avoid forcing a new runtime dep, **or** add `requests` + a `requirements.txt` if readability wins.
-- Keep `pandas` as today.
-- Add `requirements.txt` / `requirements-dev.txt` and a minimal `pytest` suite with HTTP mocked via `unittest.mock` or `responses`.
+| Field | Source |
+|-------|--------|
+| `organization` | CLI / API |
+| `project_id` / `project_name` | workspace relationship (best-effort) |
+| `workspace_id` / `workspace_name` | discovery |
+| `module` | state `module` or `root` |
+| `resource_type` | state `type` |
+| `resource_name` | state `name` |
+| `provider` | normalized from state `provider` address |
+| `provider_raw` | original provider string |
+| `instance_count` | `1` per instance (preserves count/for_each) |
 
-### 4.5 Error handling
+**Provider normalization examples:**
 
-Surface clear, actionable errors (non-zero exit):
+- `provider["registry.terraform.io/hashicorp/aws"]` → `hashicorp/aws` (report key), short label `aws` optional
+- `provider["registry.terraform.io/hashicorp/azurerm"].alias` → `hashicorp/azurerm`
 
-| Condition | Message intent |
-|-----------|----------------|
-| 401/403 | Token missing/invalid or insufficient permissions (`state-versions:read`, workspace read) |
-| 404 workspace | Org/workspace name wrong or no access |
-| 404 current state | Workspace has never successfully written state |
-| Download failure / empty body | Archivist URL expired or network/TLS issue (TFE custom CA note in docs) |
-| Invalid JSON | Corrupt download |
+Exclude `mode != managed`, and exclude `terraform_data` / `null_resource` by default (same as today). Keep `-H` / `-Ho` style filters as report options.
 
-Do not print tokens. Redact query strings from URLs in debug logs.
+### 4.6 Reports (required outputs)
 
-### 4.6 Security & ops notes
+For every successful run, print (and optionally export) at least:
 
-- Prefer env-var tokens over CLI flags (flags leak into shell history / process lists); if `--token` is allowed, document the risk.
-- Do not write downloaded state to disk by default; optional `--save-state path` for support cases.
-- Document TFE TLS / custom CA (`SSL_CERT_FILE` / corporate proxies).
-- State contains secrets; treat temp files like production secrets.
+1. **Run header** — scope, org, project (if any), hostname, workspace targeted/succeeded/failed counts
+2. **Totals**
+   - total managed resource instances
+   - unique resource types
+   - unique providers
+   - workspaces with state / without state / errors
+3. **Per provider** — instance counts (and % of total)
+4. **Per resource type** — instance counts (top N + full export)
+5. **Per workspace** — instance counts, provider mix summary
+6. **Per project** — when scope is `organization` (and project metadata available)
 
-### 4.7 CLI UX examples (target)
+Exports:
+
+- `--format table|json|csv` (table default for human use)
+- `--output path` for machine-readable full inventory and/or summary files  
+  Suggested: `summary.json` + `inventory.csv` when a directory/`--output` prefix is given
+
+Existing single-workspace detailed dump (`-G`, full resource table) remains available at workspace scope.
+
+### 4.7 CLI sketch
 
 ```bash
-# Local (unchanged)
-python terraform_resource_extractor.py -f terraform.tfstate -A
+# Workspace
+python rum_report.py --scope workspace \
+  --organization my-org --workspace prod-net
 
-# HCP Terraform
-export TFE_TOKEN=...
-python terraform_resource_extractor.py \
-  --organization my-org --workspace prod-net -A
+# Project
+python rum_report.py --scope project \
+  --organization my-org --project platform \
+  --format json --output rum-platform.json
 
-# Terraform Enterprise
-export TFE_TOKEN=...
-python terraform_resource_extractor.py \
-  --hostname tfe.example.com \
-  --organization my-org --workspace prod-net -A
+# Organization
+python rum_report.py --scope organization \
+  --organization my-org \
+  --concurrency 8
+
+# Local file (workspace-equivalent, offline)
+python rum_report.py --scope workspace -f terraform.tfstate
 ```
 
-Same source flags on `extract_resource_type_stats.py` and `temporary_intended_resources.py`.
+Auth/hostname unchanged: `TFE_TOKEN`, `TFE_HOSTNAME` (default `app.terraform.io`), optional `--token`.
 
-### 4.8 Testing strategy
+### 4.8 Relationship to existing scripts
 
-- Unit tests for URL building, workspace resolution parsing, and attribute extraction from fixture JSON:API responses.
-- Unit tests that existing extractors behave identically when fed fixture state loaded via the shared loader.
-- No live API tests in CI; optional manual checklist against a sandbox workspace.
+| Capability | Where it lives |
+|------------|----------------|
+| Scoped discovery + rollup reports | **New** `rum_report.py` (+ modules above) |
+| Deep single-state exploration | Keep `terraform_resource_extractor.py` (local + remote workspace source) |
+| Type-specific deep dive | Keep `extract_resource_type_stats.py` |
+| Temp/demo naming scan | Keep `temporary_intended_resources.py`; later optional `--include-temporary-scan` on rollup |
 
-### 4.9 Documentation updates
+Do not force org-level logic into the old CLIs; share libraries instead.
 
-- README: new “Remote state (TFC/TFE)” section with permissions, env vars, TFE hostname.
-- Script docstrings/help text.
-- Note raw-state requirement and Terraform version assumptions (standard remote state JSON).
+### 4.9 Security & ops
 
-### 4.10 Phased delivery
+- Prefer env tokens; never log secrets or full state bodies
+- State downloads are sensitive — default in-memory only
+- Document org tokens vs user tokens and required read permissions (workspaces list, state versions read)
+- TFE custom CA / proxy notes in README
+- Large orgs: warn that full org RUM may take a long time; support `--max-workspaces` for sampling/debug
+
+### 4.10 Testing strategy
+
+- Unit: provider normalization, inventory filters, pagination loop, report aggregations
+- Fixture-based: multi-workspace fake discovery + two sample states → known totals/per-provider
+- No live API in CI; optional manual checklist for sandbox org/project/workspace
+
+### 4.11 Phased delivery
 
 | Phase | Deliverable |
 |-------|-------------|
-| **P0** | Shared loader + remote flags on `terraform_resource_extractor.py` + README + tests |
-| **P1** | Same source flags on the other two scripts; optional `--save-state` |
-| **P2** (later) | Org/project multi-workspace rollup; sanitized-state option; official JSON state schema adapter |
+| **P0** | Shared client + inventory extractor + workspace-scope remote/local report (totals, per provider, per type) |
+| **P1** | Project + organization discovery (pagination, project filter), per-workspace/per-project rollups, partial-failure table, concurrency |
+| **P2** | JSON/CSV export polish, tag filters, temporary-resource rollup option, README operator runbooks |
+| **P3** (optional) | Progress UI, caching of state versions, comparison between two report snapshots |
 
-## 5. Permissions required (operator checklist)
+## 5. Permissions (operator checklist)
 
-Token (user or team) needs at least:
+Token needs, at minimum:
 
-- Read access to the target workspace
-- Permission to read state versions / download state
+- List workspaces in the org (and read project metadata for project scope)
+- Read each target workspace
+- Read/download state versions for each target workspace
 
-Exact RBAC labels vary by TFC/TFE version; docs should point operators to “read state” capability for the workspace.
+Missing permissions on a subset of workspaces → row in errors report, continue.
 
-## 6. Open assumptions (locked for planning)
+## 6. Locked assumptions
 
-1. Primary users analyze **one workspace at a time** (matches README).
-2. Raw `.tfstate` remains the canonical in-memory format.
-3. Default hostname is HCP Terraform (`app.terraform.io`); TFE is hostname override only.
-4. No SDK dependency (`terrasnek`, etc.) for MVP — thin HTTP client is enough.
-5. Python 3.9+ is an acceptable floor unless the repo later states otherwise.
+1. Hierarchy is **organization → project → workspace**; reports follow that.
+2. RUM count = managed instances excluding `null_resource` / `terraform_data` by default.
+3. Raw state download is the source of truth for counts.
+4. Org/project runs tolerate partial failures unless `--strict`.
+5. Primary UX is a dedicated report CLI; legacy scripts remain for focused local analysis.
+6. Python 3.9+; stdlib HTTP client acceptable for MVP (or `requests` if preferred during implementation).

@@ -1,22 +1,23 @@
-# TFC/TFE Support Implementation Plan
+# TFC/TFE Scoped RUM Reporting Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Let the RUM analysis scripts load Terraform state from HCP Terraform / Terraform Enterprise workspaces via API, while keeping local `.tfstate` analysis unchanged.
+**Goal:** Analyze RUM at workspace, project, or organization scope against HCP Terraform / TFE, and produce reports with totals plus per-provider / per-type / per-workspace (and per-project) breakdowns.
 
-**Architecture:** Add a shared `state_source` module that returns parsed raw state JSON from either a local file or the TFC/TFE State Versions API (`workspace` → `current-state-version` → `hosted-state-download-url`). Wire remote CLI/env options into the three existing scripts without changing core aggregation logic.
+**Architecture:** Discover workspaces for the chosen scope → download each workspace’s current raw state → normalize managed instances into a shared inventory table → aggregate reports and export. Local `-f` remains workspace-scope offline mode. Existing scripts keep deep single-state workflows via shared inventory helpers.
 
-**Tech Stack:** Python 3.9+, stdlib `urllib` + `json` + `argparse`, existing `pandas`, `pytest` for tests.
+**Tech Stack:** Python 3.9+, stdlib `urllib`/`json`/`argparse`/`concurrent.futures`, `pandas`, `pytest`.
 
 ## Global Constraints
 
-- Prefer raw state download (`hosted-state-download-url`), not `hosted-json-state-download-url`.
-- Default hostname: `app.terraform.io`; TFE uses `--hostname` / `TFE_HOSTNAME`.
-- Token from `TFE_TOKEN` preferred; optional `--token` allowed but discouraged in docs.
-- Exactly one source: `-f/--file` **or** remote workspace identity.
-- Do not print tokens or write state to disk unless `--save-state` is set.
-- Keep analysis behavior for local files byte-for-byte equivalent (same filters, counts, exits).
-- No multi-workspace aggregation in this plan (deferred).
+- Scopes: `workspace` | `project` | `organization` (exactly one per run).
+- Prefer raw state (`hosted-state-download-url`), not JSON-state schema.
+- Default hostname `app.terraform.io`; TFE via `--hostname` / `TFE_HOSTNAME`.
+- Token via `TFE_TOKEN` (preferred) or `--token`.
+- Default RUM filters: `mode == managed`, exclude `null_resource` and `terraform_data`.
+- Org/project runs continue on per-workspace errors unless `--strict`.
+- Do not print tokens or state bodies.
+- Spec reference: `docs/superpowers/specs/2026-07-28-tfc-tfe-support-design.md`.
 
 ---
 
@@ -24,34 +25,33 @@
 
 | Path | Responsibility |
 |------|----------------|
-| `state_source.py` | Load state from file or TFC/TFE; shared argparse helpers |
-| `tfc_client.py` | Thin HTTP client for workspace lookup + state download |
-| `terraform_resource_extractor.py` | Use shared loader; add remote flags |
-| `extract_resource_type_stats.py` | Use shared loader; add remote flags |
-| `temporary_intended_resources.py` | Use shared loader; add remote flags (replace brittle `sys.argv`) |
-| `requirements.txt` | Runtime deps (`pandas`) |
-| `requirements-dev.txt` | `pytest` |
-| `tests/fixtures/*.json` | Sample state + JSON:API responses |
-| `tests/test_tfc_client.py` | HTTP client unit tests |
-| `tests/test_state_source.py` | Source selection / validation tests |
-| `tests/test_extractor_compat.py` | Local fixture still aggregates correctly |
-| `README.md` | Document remote usage |
-| `docs/superpowers/specs/2026-07-28-tfc-tfe-support-design.md` | Design reference (already written) |
+| `tfc_client.py` | Auth HTTP, workspace/project lookup, list+paginate, state download |
+| `inventory.py` | State → normalized rows; provider normalization; shared filters |
+| `discover.py` | Resolve scope → list of workspace refs |
+| `report.py` | Totals and breakdown tables; JSON/CSV export |
+| `rum_report.py` | Primary CLI |
+| `terraform_resource_extractor.py` | Use `inventory.py` (compat); optional remote workspace source |
+| `requirements.txt` / `requirements-dev.txt` | Deps |
+| `tests/fixtures/...` | Sample states + JSON:API list/show/state-version payloads |
+| `tests/test_*.py` | Unit tests |
+| `README.md` | Operator docs for all scopes |
 
 ---
 
-### Task 1: Project scaffolding and fixtures
+### Task 1: Scaffolding and fixtures
 
 **Files:**
-- Create: `requirements.txt`
-- Create: `requirements-dev.txt`
-- Create: `tests/fixtures/sample.tfstate`
+- Create: `requirements.txt`, `requirements-dev.txt`
+- Create: `tests/fixtures/sample_aws.tfstate`
+- Create: `tests/fixtures/sample_azurerm.tfstate`
 - Create: `tests/fixtures/workspace_show.json`
+- Create: `tests/fixtures/project_show.json`
+- Create: `tests/fixtures/workspaces_page1.json`
+- Create: `tests/fixtures/workspaces_page2.json`
 - Create: `tests/fixtures/current_state_version.json`
-- Modify: `README.md` (add install note only if missing; full remote docs in Task 6)
 
 **Interfaces:**
-- Produces: fixture files consumed by later tests; `pip install -r requirements-dev.txt` works
+- Produces: installable deps + fixtures for later tasks
 
 - [ ] **Step 1: Add dependency files**
 
@@ -64,87 +64,136 @@ pandas>=2.0
 pytest>=8.0
 ```
 
-- [ ] **Step 2: Add a minimal managed-resource state fixture**
+- [ ] **Step 2: Add two small state fixtures** (different providers) used later for rollup totals
 
-`tests/fixtures/sample.tfstate`:
+`tests/fixtures/sample_aws.tfstate` — 2× `aws_instance` managed instances (+ a `null_resource` to prove exclusion).
 
-```json
-{
-  "version": 4,
-  "terraform_version": "1.5.0",
-  "serial": 1,
-  "lineage": "test-lineage",
-  "outputs": {},
-  "resources": [
-    {
-      "mode": "managed",
-      "type": "aws_instance",
-      "name": "web",
-      "provider": "provider[\"registry.terraform.io/hashicorp/aws\"]",
-      "instances": [
-        {"attributes": {"id": "i-1", "name": "web-demo"}},
-        {"attributes": {"id": "i-2", "name": "web-prod"}}
-      ]
-    },
-    {
-      "mode": "managed",
-      "type": "null_resource",
-      "name": "ignored",
-      "provider": "provider[\"registry.terraform.io/hashicorp/null\"]",
-      "instances": [{"attributes": {}}]
-    },
-    {
-      "mode": "data",
-      "type": "aws_ami",
-      "name": "ami",
-      "provider": "provider[\"registry.terraform.io/hashicorp/aws\"]",
-      "instances": [{"attributes": {"id": "ami-1"}}]
-    }
-  ]
-}
-```
+`tests/fixtures/sample_azurerm.tfstate` — 3× `azurerm_resource_group` managed instances.
 
-- [ ] **Step 3: Add JSON:API fixtures**
+(Use the same shape as in the prior plan’s `sample.tfstate`, varying provider/type/counts.)
 
-`tests/fixtures/workspace_show.json`:
+- [ ] **Step 3: Add API fixtures**
 
-```json
-{
-  "data": {
-    "id": "ws-TESTWORKSPACE",
-    "type": "workspaces",
-    "attributes": {
-      "name": "prod-net"
-    }
-  }
-}
-```
-
-`tests/fixtures/current_state_version.json`:
-
-```json
-{
-  "data": {
-    "id": "sv-TESTSTATE",
-    "type": "state-versions",
-    "attributes": {
-      "hosted-state-download-url": "https://archivist.example.test/v1/object/raw-state",
-      "hosted-json-state-download-url": "https://archivist.example.test/v1/object/json-state"
-    }
-  }
-}
-```
+- `workspace_show.json` → `data.id = ws-A`
+- `project_show.json` → `data.id = prj-PLATFORM`
+- `workspaces_page1.json` / `workspaces_page2.json` — two workspaces with project relationships; page1 has `next-page: 2`, page2 has `next-page: null`
+- `current_state_version.json` — includes `hosted-state-download-url`
 
 - [ ] **Step 4: Commit**
 
 ```bash
 git add requirements.txt requirements-dev.txt tests/fixtures
-git commit -m "chore: add deps and fixtures for TFC/TFE support"
+git commit -m "chore: add deps and fixtures for scoped RUM reporting"
 ```
 
 ---
 
-### Task 2: TFC/TFE HTTP client
+### Task 2: Inventory extraction + provider normalization
+
+**Files:**
+- Create: `inventory.py`
+- Create: `tests/test_inventory.py`
+
+**Interfaces:**
+- Produces:
+  - `normalize_provider(provider_raw: str) -> str`
+  - `extract_inventory(state_data: dict, *, organization=None, project_id=None, project_name=None, workspace_id=None, workspace_name=None, exclude_types=None, only_hashi=False, hide_hashi=False) -> pd.DataFrame`
+  - Columns: `organization, project_id, project_name, workspace_id, workspace_name, module, resource_type, resource_name, provider, provider_raw, instance_count`
+
+- [ ] **Step 1: Write failing tests**
+
+```python
+# tests/test_inventory.py
+import json
+from pathlib import Path
+from inventory import extract_inventory, normalize_provider
+
+FIX = Path(__file__).parent / "fixtures"
+
+
+def test_normalize_provider():
+    assert normalize_provider('provider["registry.terraform.io/hashicorp/aws"]') == "hashicorp/aws"
+    assert normalize_provider('provider["registry.terraform.io/hashicorp/azurerm"].prod') == "hashicorp/azurerm"
+
+
+def test_extract_counts_and_excludes_null():
+    state = json.loads((FIX / "sample_aws.tfstate").read_text())
+    df = extract_inventory(state, workspace_name="ws1", organization="org")
+    assert df["instance_count"].sum() == 2
+    assert set(df["provider"]) == {"hashicorp/aws"}
+    assert "null_resource" not in set(df["resource_type"])
+```
+
+- [ ] **Step 2: Run to verify fail**
+
+Run: `pip install -r requirements-dev.txt && pytest tests/test_inventory.py -v`  
+Expected: import error
+
+- [ ] **Step 3: Implement `inventory.py`**
+
+```python
+# inventory.py (core logic sketch)
+import re
+import pandas as pd
+
+_PROVIDER_RE = re.compile(r'provider\["([^"]+)"\]')
+DEFAULT_EXCLUDE = {"null_resource", "terraform_data"}
+
+def normalize_provider(provider_raw: str) -> str:
+    m = _PROVIDER_RE.search(provider_raw or "")
+    if not m:
+        return provider_raw or "unknown"
+    addr = m.group(1)  # registry.terraform.io/hashicorp/aws
+    parts = addr.split("/")
+    if len(parts) >= 2:
+        return "/".join(parts[-2:])  # hashicorp/aws
+    return addr
+
+def extract_inventory(state_data, **meta):
+    exclude = meta.pop("exclude_types", None) or DEFAULT_EXCLUDE
+    only_hashi = meta.pop("only_hashi", False)
+    hide_hashi = meta.pop("hide_hashi", False)
+    rows = []
+    for resource in state_data.get("resources", []):
+        if resource.get("mode") != "managed":
+            continue
+        rtype = resource.get("type", "unknown")
+        if rtype in exclude:
+            continue
+        is_hashi = rtype.startswith("tfe_") or rtype.startswith("vault_")
+        if hide_hashi and is_hashi:
+            continue
+        if only_hashi and not is_hashi:
+            continue
+        provider_raw = resource.get("provider", "unknown")
+        for _ in resource.get("instances", []):
+            rows.append({
+                "organization": meta.get("organization"),
+                "project_id": meta.get("project_id"),
+                "project_name": meta.get("project_name"),
+                "workspace_id": meta.get("workspace_id"),
+                "workspace_name": meta.get("workspace_name"),
+                "module": resource.get("module", "root"),
+                "resource_type": rtype,
+                "resource_name": resource.get("name", "unknown"),
+                "provider": normalize_provider(provider_raw),
+                "provider_raw": provider_raw,
+                "instance_count": 1,
+            })
+    return pd.DataFrame(rows)
+```
+
+- [ ] **Step 4: Run tests — expect PASS; commit**
+
+```bash
+pytest tests/test_inventory.py -v
+git add inventory.py tests/test_inventory.py
+git commit -m "feat: add shared RUM inventory extractor"
+```
+
+---
+
+### Task 3: TFC client (show, list+paginate, download state)
 
 **Files:**
 - Create: `tfc_client.py`
@@ -153,539 +202,249 @@ git commit -m "chore: add deps and fixtures for TFC/TFE support"
 **Interfaces:**
 - Produces:
   - `class TfcClient`
-  - `TfcClient(hostname: str, token: str, timeout: float = 60.0)`
-  - `get_workspace_id(organization: str, workspace: str) -> str`
-  - `download_current_state(workspace_id: str) -> dict`
-- Consumes: JSON:API fixtures; mocked `urlopen`
+  - `get_workspace(organization, workspace) -> dict` (id + attrs)
+  - `get_project_id(organization, project_name) -> str`
+  - `list_workspaces(organization, *, project_id=None, page_size=100) -> list[dict]`
+  - `download_current_state(workspace_id) -> dict`
+  - `class TfcApiError`
 
-- [ ] **Step 1: Write failing tests**
-
-```python
-# tests/test_tfc_client.py
-import json
-from pathlib import Path
-from unittest.mock import patch, MagicMock
-import pytest
-
-from tfc_client import TfcClient, TfcApiError
-
-FIX = Path(__file__).parent / "fixtures"
-
-
-def _resp(body: bytes, status=200):
-    mock = MagicMock()
-    mock.status = status
-    mock.read.return_value = body
-    mock.__enter__.return_value = mock
-    mock.__exit__.return_value = False
-    return mock
-
-
-def test_get_workspace_id():
-    body = (FIX / "workspace_show.json").read_bytes()
-    client = TfcClient("app.terraform.io", "token")
-    with patch("tfc_client.urlopen", return_value=_resp(body)) as m:
-        assert client.get_workspace_id("my-org", "prod-net") == "ws-TESTWORKSPACE"
-        req = m.call_args.args[0]
-        assert req.full_url.endswith("/api/v2/organizations/my-org/workspaces/prod-net")
-        assert req.get_header("Authorization") == "Bearer token"
-
-
-def test_download_current_state_uses_hosted_state_url():
-    csv = (FIX / "current_state_version.json").read_bytes()
-    state = (FIX / "sample.tfstate").read_bytes()
-    client = TfcClient("tfe.example.com", "token")
-
-    with patch("tfc_client.urlopen", side_effect=[_resp(csv), _resp(state)]) as m:
-        data = client.download_current_state("ws-TESTWORKSPACE")
-        assert data["resources"][0]["type"] == "aws_instance"
-        assert m.call_args_list[0].args[0].full_url.endswith(
-            "/api/v2/workspaces/ws-TESTWORKSPACE/current-state-version"
-        )
-        assert m.call_args_list[1].args[0].full_url == (
-            "https://archivist.example.test/v1/object/raw-state"
-        )
-
-
-def test_api_error_on_401():
-    client = TfcClient("app.terraform.io", "bad")
-    with patch("tfc_client.urlopen", return_value=_resp(b'{"errors":[]}', status=401)):
-        with pytest.raises(TfcApiError, match="401"):
-            client.get_workspace_id("o", "w")
-```
-
-- [ ] **Step 2: Run tests to verify they fail**
-
-Run: `pip install -r requirements-dev.txt && pytest tests/test_tfc_client.py -v`  
-Expected: FAIL with `ModuleNotFoundError: No module named 'tfc_client'`
-
-- [ ] **Step 3: Implement minimal client**
+Workspace list item shape returned to callers:
 
 ```python
-# tfc_client.py
-from __future__ import annotations
-
-import json
-from typing import Any
-from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
-
-
-class TfcApiError(RuntimeError):
-    pass
-
-
-class TfcClient:
-    def __init__(self, hostname: str, token: str, timeout: float = 60.0) -> None:
-        host = hostname.strip().removeprefix("https://").removeprefix("http://").rstrip("/")
-        self.base_url = f"https://{host}"
-        self.token = token
-        self.timeout = timeout
-
-    def _request(self, url: str) -> bytes:
-        req = Request(
-            url,
-            headers={
-                "Authorization": f"Bearer {self.token}",
-                "Content-Type": "application/vnd.api+json",
-            },
-            method="GET",
-        )
-        try:
-            with urlopen(req, timeout=self.timeout) as resp:
-                body = resp.read()
-                if getattr(resp, "status", 200) >= 400:
-                    raise TfcApiError(f"TFC/TFE API error {resp.status} for {url}")
-                return body
-        except HTTPError as e:
-            raise TfcApiError(f"TFC/TFE API error {e.code} for {url}") from e
-        except URLError as e:
-            raise TfcApiError(f"TFC/TFE network error for {url}: {e.reason}") from e
-
-    def get_workspace_id(self, organization: str, workspace: str) -> str:
-        url = f"{self.base_url}/api/v2/organizations/{organization}/workspaces/{workspace}"
-        payload = json.loads(self._request(url))
-        try:
-            return payload["data"]["id"]
-        except (KeyError, TypeError) as e:
-            raise TfcApiError("Unexpected workspace API response") from e
-
-    def download_current_state(self, workspace_id: str) -> dict[str, Any]:
-        meta_url = f"{self.base_url}/api/v2/workspaces/{workspace_id}/current-state-version"
-        meta = json.loads(self._request(meta_url))
-        try:
-            download_url = meta["data"]["attributes"]["hosted-state-download-url"]
-        except (KeyError, TypeError) as e:
-            raise TfcApiError("No hosted-state-download-url on current state version") from e
-        if not download_url:
-            raise TfcApiError("Workspace current state version has empty download URL")
-        return json.loads(self._request(download_url))
+{
+  "id": "ws-A",
+  "name": "net",
+  "project_id": "prj-PLATFORM",
+  "project_name": "platform",  # if present in included/relationships
+}
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [ ] **Step 1: Write failing tests** for workspace id lookup, pagination across two fixture pages, project filter query param encoding, and raw state download URL selection (not json-state URL).
 
-Run: `pytest tests/test_tfc_client.py -v`  
-Expected: PASS
+- [ ] **Step 2: Implement client with `urllib`**, percent-encoding `filter[project][id]` and `page[number]` / `page[size]`.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 3: pytest PASS; commit**
 
 ```bash
-git add tfc_client.py tests/test_tfc_client.py
-git commit -m "feat: add TFC/TFE API client for state download"
+git commit -m "feat: add TFC/TFE client with paginated workspace listing"
 ```
 
 ---
 
-### Task 3: Shared state source + argparse helpers
+### Task 4: Scope discovery
 
 **Files:**
-- Create: `state_source.py`
-- Create: `tests/test_state_source.py`
+- Create: `discover.py`
+- Create: `tests/test_discover.py`
 
 **Interfaces:**
 - Consumes: `TfcClient`
 - Produces:
-  - `load_state_data(file: str | None, *, hostname, token, organization, workspace, workspace_id, save_state: str | None) -> dict`
-  - `add_state_source_arguments(parser: argparse.ArgumentParser) -> None`
-  - `resolve_token(cli_token: str | None) -> str | None` reading `TFE_TOKEN`
+  - `discover_workspaces(client, scope, *, organization, workspace=None, workspace_id=None, project=None, project_id=None) -> list[WorkspaceRef]`
 
-- [ ] **Step 1: Write failing tests**
+Rules:
 
-```python
-# tests/test_state_source.py
-import json
-import os
-from pathlib import Path
-from unittest.mock import patch
-import pytest
+- `scope=workspace` → one ref (by id or org+name)
+- `scope=project` → resolve project id if needed → `list_workspaces(..., project_id=)`
+- `scope=organization` → `list_workspaces(organization)`
 
-from state_source import load_state_data, StateSourceError
+- [ ] **Step 1: Failing tests** for each scope using mocked client return values.
 
-FIX = Path(__file__).parent / "fixtures"
+- [ ] **Step 2: Implement `discover.py`**.
 
-
-def test_load_from_file():
-    data = load_state_data(str(FIX / "sample.tfstate"))
-    assert len(data["resources"]) == 3
-
-
-def test_remote_requires_token(monkeypatch):
-    monkeypatch.delenv("TFE_TOKEN", raising=False)
-    with pytest.raises(StateSourceError, match="token"):
-        load_state_data(
-            None,
-            organization="o",
-            workspace="w",
-            hostname="app.terraform.io",
-            token=None,
-        )
-
-
-def test_mutual_exclusion():
-    with pytest.raises(StateSourceError, match="not both"):
-        load_state_data(
-            str(FIX / "sample.tfstate"),
-            organization="o",
-            workspace="w",
-            token="t",
-        )
-
-
-def test_load_from_remote_with_workspace_id(monkeypatch):
-    monkeypatch.setenv("TFE_TOKEN", "t")
-    state = json.loads((FIX / "sample.tfstate").read_text())
-    with patch("state_source.TfcClient") as cls:
-        cls.return_value.download_current_state.return_value = state
-        data = load_state_data(
-            None,
-            workspace_id="ws-1",
-            hostname="app.terraform.io",
-        )
-        assert data is state
-        cls.assert_called_once_with("app.terraform.io", "t")
-```
-
-- [ ] **Step 2: Run tests to verify they fail**
-
-Run: `pytest tests/test_state_source.py -v`  
-Expected: FAIL with import error
-
-- [ ] **Step 3: Implement `state_source.py`**
-
-```python
-# state_source.py
-from __future__ import annotations
-
-import argparse
-import json
-import os
-from typing import Any
-
-from tfc_client import TfcApiError, TfcClient
-
-
-class StateSourceError(ValueError):
-    pass
-
-
-def resolve_token(cli_token: str | None) -> str | None:
-    return cli_token or os.environ.get("TFE_TOKEN") or None
-
-
-def add_state_source_arguments(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("-f", "--file", help="Local Terraform state file (.tfstate).")
-    parser.add_argument("--organization", default=os.environ.get("TFC_ORGANIZATION"),
-                        help="TFC/TFE organization name (or TFC_ORGANIZATION).")
-    parser.add_argument("--workspace", default=os.environ.get("TFC_WORKSPACE"),
-                        help="TFC/TFE workspace name (or TFC_WORKSPACE).")
-    parser.add_argument("--workspace-id", default=None, help="TFC/TFE workspace ID (ws-...).")
-    parser.add_argument("--hostname", default=os.environ.get("TFE_HOSTNAME", "app.terraform.io"),
-                        help="TFC/TFE hostname (default app.terraform.io or TFE_HOSTNAME).")
-    parser.add_argument("--token", default=None, help="API token (prefer TFE_TOKEN env var).")
-    parser.add_argument("--save-state", default=None, help="Optional path to write downloaded state.")
-
-
-def load_state_data(
-    file: str | None,
-    *,
-    hostname: str = "app.terraform.io",
-    token: str | None = None,
-    organization: str | None = None,
-    workspace: str | None = None,
-    workspace_id: str | None = None,
-    save_state: str | None = None,
-) -> dict[str, Any]:
-    remote_requested = any([organization, workspace, workspace_id])
-    if file and remote_requested:
-        raise StateSourceError("Provide a local --file or remote workspace identity, not both.")
-    if not file and not remote_requested:
-        raise StateSourceError("Provide --file or remote --organization/--workspace (or --workspace-id).")
-
-    if file:
-        try:
-            with open(file, "r", encoding="utf-8") as fh:
-                return json.load(fh)
-        except FileNotFoundError as e:
-            raise StateSourceError(f"File '{file}' not found.") from e
-        except json.JSONDecodeError as e:
-            raise StateSourceError(f"File '{file}' is not valid JSON.") from e
-
-    resolved = resolve_token(token)
-    if not resolved:
-        raise StateSourceError("Remote state requires a token via TFE_TOKEN or --token.")
-
-    if not workspace_id:
-        if not organization or not workspace:
-            raise StateSourceError("Remote state requires --workspace-id or both --organization and --workspace.")
-        try:
-            workspace_id = TfcClient(hostname, resolved).get_workspace_id(organization, workspace)
-        except TfcApiError as e:
-            raise StateSourceError(str(e)) from e
-
-    try:
-        data = TfcClient(hostname, resolved).download_current_state(workspace_id)
-    except TfcApiError as e:
-        raise StateSourceError(str(e)) from e
-
-    if save_state:
-        with open(save_state, "w", encoding="utf-8") as fh:
-            json.dump(data, fh)
-    return data
-```
-
-- [ ] **Step 4: Run tests to verify they pass**
-
-Run: `pytest tests/test_state_source.py -v`  
-Expected: PASS
-
-- [ ] **Step 5: Commit**
+- [ ] **Step 3: PASS; commit**
 
 ```bash
-git add state_source.py tests/test_state_source.py
-git commit -m "feat: add shared local/remote state source loader"
+git commit -m "feat: discover workspaces for org/project/workspace scopes"
 ```
 
 ---
 
-### Task 4: Wire remote source into `terraform_resource_extractor.py`
+### Task 5: Report aggregations + export
+
+**Files:**
+- Create: `report.py`
+- Create: `tests/test_report.py`
+
+**Interfaces:**
+- Produces:
+  - `build_report(inventory_df, *, errors: list[dict], scope: str, organization: str, project: str | None) -> dict`
+  - Report dict keys:
+    - `meta` (scope, org, project, workspace_counts)
+    - `totals` (`instances`, `unique_resource_types`, `unique_providers`, `workspaces_succeeded`, `workspaces_failed`)
+    - `by_provider` (list of `{provider, instances, pct}`)
+    - `by_resource_type`
+    - `by_workspace`
+    - `by_project` (empty unless org scope / project cols present)
+    - `errors`
+  - `render_table(report) -> str`
+  - `write_json(report, path)` / `write_inventory_csv(df, path)`
+
+- [ ] **Step 1: Failing test** concatenating aws(2) + azurerm(3) inventories → totals 5; providers hashicorp/aws=2, hashicorp/azurerm=3; two workspaces.
+
+```python
+def test_rollup_totals_and_providers():
+    aws = extract_inventory(json.loads((FIX/"sample_aws.tfstate").read_text()),
+                            workspace_name="a", organization="o")
+    azu = extract_inventory(json.loads((FIX/"sample_azurerm.tfstate").read_text()),
+                            workspace_name="b", organization="o")
+    import pandas as pd
+    from report import build_report
+    rep = build_report(pd.concat([aws, azu], ignore_index=True), errors=[], scope="organization", organization="o", project=None)
+    assert rep["totals"]["instances"] == 5
+    providers = {r["provider"]: r["instances"] for r in rep["by_provider"]}
+    assert providers["hashicorp/aws"] == 2
+    assert providers["hashicorp/azurerm"] == 3
+```
+
+- [ ] **Step 2: Implement aggregations with pandas `groupby`**.
+
+- [ ] **Step 3: PASS; commit**
+
+```bash
+git commit -m "feat: add RUM totals and per-provider report builder"
+```
+
+---
+
+### Task 6: Primary CLI `rum_report.py` (P0 workspace + local)
+
+**Files:**
+- Create: `rum_report.py`
+- Create: `tests/test_rum_report_cli.py`
+
+**Interfaces:**
+- CLI flags: `--scope`, `-f/--file`, `--organization`, `--workspace`, `--workspace-id`, `--project`, `--project-id`, `--hostname`, `--token`, `--concurrency`, `--strict`, `--format table|json|csv`, `--output`, `--hide-tfe-vault`, `--only-tfe-vault`, `--max-workspaces`
+
+P0 behavior to ship first:
+
+- `scope=workspace` with `-f` or remote workspace identity
+- prints totals + by_provider + by_resource_type
+- json output optional
+
+- [ ] **Step 1: Implement CLI wiring** calling discover (or direct local load) → inventory → report → render.
+
+Local path shortcut:
+
+```python
+if args.file:
+    state = json.load(open(args.file))
+    df = extract_inventory(state, workspace_name=args.file, organization=args.organization)
+    errors = []
+else:
+    # remote path using client + discover + per-ws download
+    ...
+```
+
+- [ ] **Step 2: CLI test** via `subprocess` or calling `main` with `argv` on local fixture.
+
+Run: `python rum_report.py --scope workspace -f tests/fixtures/sample_aws.tfstate --format json`  
+Expected: JSON with `"totals": {"instances": 2, ...}`
+
+- [ ] **Step 3: Commit**
+
+```bash
+git commit -m "feat: add rum_report CLI for workspace-scope analysis"
+```
+
+---
+
+### Task 7: Project + organization scope with concurrency (P1)
+
+**Files:**
+- Modify: `rum_report.py`, `tfc_client.py` (if needed)
+- Create: `tests/test_scoped_run.py`
+
+**Interfaces:**
+- For each discovered workspace, fetch state in a `ThreadPoolExecutor(max_workers=concurrency)`
+- Collect inventories + error dicts `{workspace_id, workspace_name, error}`
+- Honor `--max-workspaces`
+- `--strict` → exit 1 if any workspace error
+- Default → exit 1 only when zero successes
+
+- [ ] **Step 1: Test** mocked discover returning 2 workspaces; mocked downloads returning the two fixtures; assert org report totals == 5 and `by_workspace` has 2 rows.
+
+- [ ] **Step 2: Implement fan-out fetch + concat**.
+
+- [ ] **Step 3: Include `by_project` aggregation when `project_id` present.
+
+- [ ] **Step 4: PASS; commit**
+
+```bash
+git commit -m "feat: support project and organization RUM rollups"
+```
+
+---
+
+### Task 8: Wire shared inventory into existing extractor (compat)
 
 **Files:**
 - Modify: `terraform_resource_extractor.py`
 - Create: `tests/test_extractor_compat.py`
 
 **Interfaces:**
-- Consumes: `add_state_source_arguments`, `load_state_data`, `StateSourceError`
-- Produces: CLI supports local and remote; `extract_resources` unchanged
+- `extract_resources` delegates counting to `inventory.extract_inventory` (map columns back to existing display names) **or** keep current logic but add a comment + dual-run test ensuring instance totals match `inventory` on fixtures.
 
-- [ ] **Step 1: Write compatibility test using local fixture**
-
-```python
-# tests/test_extractor_compat.py
-from pathlib import Path
-from terraform_resource_extractor import extract_resources, load_state_file
-
-FIX = Path(__file__).parent / "fixtures" / "sample.tfstate"
-
-
-def test_extract_skips_null_and_data():
-    # After refactor, prefer loading via state_source; keep extract_resources pure.
-    import json
-    state = json.loads(FIX.read_text())
-    df, hashi = extract_resources(state)
-    assert len(df) == 2  # two aws_instance instances
-    assert set(df["Resource Type"]) == {"aws_instance"}
-```
-
-- [ ] **Step 2: Refactor main to use shared loader**
-
-Replace `load_state_file(args.file)` usage in `main()`:
-
-1. Remove required=`True` from local `-f` (moved to shared helper) — delete the old `-f` definition and call `add_state_source_arguments(parser)` instead.
-2. Load with:
+Prefer **shared implementation** to avoid drift:
 
 ```python
-from state_source import add_state_source_arguments, load_state_data, StateSourceError
-
-# in main(), after parse_args:
-try:
-    state_data = load_state_data(
-        args.file,
-        hostname=args.hostname,
-        token=args.token,
-        organization=args.organization,
-        workspace=args.workspace,
-        workspace_id=args.workspace_id,
-        save_state=args.save_state,
-    )
-except StateSourceError as e:
-    print(f"❌ Error: {e}")
-    exit(1)
+df = extract_inventory(state_data, hide_hashi=exclude_tfe_vault, only_hashi=only_tfe_vault)
+# rename columns for existing printers: provider→Provider, etc.
 ```
 
-3. Keep `load_state_file` as a thin wrapper around `load_state_data(file)` for backward compatibility **or** delete it if unused after refactor (prefer delete + update docstring examples).
+- [ ] **Step 1: Compat test** — old displayed total instances == inventory sum on fixtures.
 
-- [ ] **Step 3: Run tests**
-
-Run: `pytest tests/test_extractor_compat.py tests/test_state_source.py -v`  
-Expected: PASS
-
-- [ ] **Step 4: Manual smoke (local)**
-
-Run: `python terraform_resource_extractor.py -f tests/fixtures/sample.tfstate -n`  
-Expected: `Total number of resource instances: 2`
-
-- [ ] **Step 5: Commit**
+- [ ] **Step 2: Refactor; commit**
 
 ```bash
-git add terraform_resource_extractor.py tests/test_extractor_compat.py
-git commit -m "feat: support TFC/TFE remote state in resource extractor"
+git commit -m "refactor: share inventory counting with resource extractor"
 ```
 
 ---
 
-### Task 5: Wire the other two scripts
-
-**Files:**
-- Modify: `extract_resource_type_stats.py`
-- Modify: `temporary_intended_resources.py`
-- Create: `tests/test_temporary_and_stats.py`
-
-**Interfaces:**
-- Consumes: same `state_source` helpers
-- Produces: both scripts accept remote flags; `temporary_intended_resources.py` gains argparse (breaking soft: positional path still accepted as `-f` equivalent)
-
-- [ ] **Step 1: Write tests**
-
-```python
-# tests/test_temporary_and_stats.py
-import json
-from pathlib import Path
-from extract_resource_type_stats import extract_resource_instances
-from temporary_intended_resources import extract_resources as extract_temp
-
-FIX = Path(__file__).parent / "fixtures" / "sample.tfstate"
-
-
-def test_stats_counts_unique_instances(tmp_path):
-    df = extract_resource_instances(str(FIX), "aws_instance", detailed_output=False)
-    assert len(df) == 2
-
-
-def test_temporary_matches_demo_name(capsys):
-    # Refactor extract_resources to accept state dict OR path; test dict path:
-    state = json.loads(FIX.read_text())
-    df = extract_temp(state_data=state)
-    assert df is not None
-    assert (df["Resource Name"] == "web-demo").any()
-```
-
-- [ ] **Step 2: Refactor `extract_resource_type_stats.py`**
-
-- Change `extract_resource_instances` to accept either a path or preloaded `state_data: dict | None = None`.
-- In `__main__`, use `add_state_source_arguments` + `load_state_data`, then pass `state_data=` into the function.
-
-- [ ] **Step 3: Refactor `temporary_intended_resources.py`**
-
-- Replace `sys.argv` parsing with `argparse`.
-- Keep keyword filtering logic; split I/O from analysis:
-
-```python
-def extract_resources(state_file_path=None, display_attributes=False, state_data=None):
-    if state_data is None:
-        # load via state_source.load_state_data(state_file_path) or open path
-        ...
-```
-
-- Add remote flags identically.
-
-- [ ] **Step 4: Run full suite**
-
-Run: `pytest -v`  
-Expected: all PASS
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add extract_resource_type_stats.py temporary_intended_resources.py tests/test_temporary_and_stats.py
-git commit -m "feat: add TFC/TFE state source to stats and temporary-resource scripts"
-```
-
----
-
-### Task 6: Documentation and operator checklist
+### Task 9: Documentation
 
 **Files:**
 - Modify: `README.md`
-- Modify: module docstrings in the three scripts
 
-**Interfaces:**
-- Produces: operators can follow README to run against TFC and TFE
+- [ ] **Step 1: Document**
+  - Install
+  - Scopes: workspace / project / organization with examples
+  - Report sections (totals, per provider, per type, per workspace, per project)
+  - Auth, TFE hostname, permissions
+  - Partial failure / `--strict` / `--concurrency`
+  - Relationship of `rum_report.py` vs legacy scripts
+  - Security notes (state secrets)
 
-- [ ] **Step 1: Add README section after installation**
-
-Include:
-
-1. Install: `pip install -r requirements.txt`
-2. Local usage (existing examples)
-3. **Remote state (HCP Terraform / TFE)**
-   - Env: `TFE_TOKEN`, optional `TFE_HOSTNAME`, `TFC_ORGANIZATION`, `TFC_WORKSPACE`
-   - Examples for TFC and TFE hostname
-   - Required permissions (workspace read + state version download)
-   - Note: uses raw state download URL
-   - Security: prefer env token; state may contain secrets; `--save-state` caution
-4. Dev: `pip install -r requirements-dev.txt && pytest`
-
-- [ ] **Step 2: Update top-of-file usage examples in each script** to show one remote example.
-
-- [ ] **Step 3: Commit**
+- [ ] **Step 2: Commit**
 
 ```bash
-git add README.md terraform_resource_extractor.py extract_resource_type_stats.py temporary_intended_resources.py
-git commit -m "docs: document TFC/TFE remote state usage"
+git commit -m "docs: document scoped TFC/TFE RUM reporting"
 ```
 
 ---
 
-### Task 7: Manual verification checklist (no live CI dependency)
+### Task 10: Manual verification checklist
 
-**Files:** none (operator / agent with credentials)
-
-- [ ] **Step 1: Local regression**
-
-```bash
-python terraform_resource_extractor.py -f tests/fixtures/sample.tfstate -A
-python extract_resource_type_stats.py -f tests/fixtures/sample.tfstate -r aws_instance
-python temporary_intended_resources.py -f tests/fixtures/sample.tfstate
-```
-
-- [ ] **Step 2: Against a real workspace (optional)**
-
-```bash
-export TFE_TOKEN=...
-python terraform_resource_extractor.py --organization ORG --workspace WS -A
-python terraform_resource_extractor.py --hostname tfe.example.com --organization ORG --workspace WS -n
-```
-
-Confirm counts match a manually downloaded `.tfstate` analyzed with `-f`.
-
-- [ ] **Step 3: Negative paths**
-
-- Bad token → clear 401 error
-- File + remote flags together → validation error
-- Missing token → validation error
+- [ ] Local workspace fixture report matches expected counts
+- [ ] Remote single workspace matches manually downloaded `-f` analysis
+- [ ] Project scope only includes that project’s workspaces
+- [ ] Org scope paginates beyond 100 workspaces
+- [ ] Workspace without state appears under errors, org report still succeeds
+- [ ] Per-provider totals sum to overall instances
 
 ---
 
 ## Self-review
 
-1. **Spec coverage:** P0/P1 from design map to Tasks 2–6; P2 multi-workspace explicitly deferred; raw state choice enforced in client tests.
-2. **Placeholders:** None intentionally left; fixture IDs and function signatures are concrete.
-3. **Type consistency:** `TfcClient.download_current_state` → `dict`; `load_state_data` → `dict`; scripts consume `state_data` dicts.
+1. **Spec coverage:** workspace/project/org scopes, discovery, raw state fetch, totals + per-provider/type/workspace/project reports, partial failures, concurrency, exports — all tasked.
+2. **Placeholders:** none intentional; fixture names and function signatures are concrete.
+3. **Consistency:** inventory columns feed report groupbys; client list shape matches discover `WorkspaceRef`.
 
-## Deferred (not in this plan)
+## Deferred
 
-- Org-wide RUM rollup / project filters
-- `hosted-json-state-download-url` / `terraform show -json` adapter
-- `TF_TOKEN_<hostname>` multi-host token map
-- Official HashiCorp Python SDK
-- Ephemeral workspace automation from `temporary_intended_resources.py` findings
+- Snapshot diff (“RUM last week vs today”)
+- Tag-based workspace filters
+- `hosted-json-state-download-url` adapter
+- Billing/list-price enrichment
+- Temporary-resource scan inside org rollups (can call existing helper later)

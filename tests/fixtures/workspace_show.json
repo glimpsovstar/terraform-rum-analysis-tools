@@ -1,0 +1,17 @@
+{
+  "data": {
+    "id": "ws-A",
+    "type": "workspaces",
+    "attributes": {
+      "name": "prod-net"
+    },
+    "relationships": {
+      "project": {
+        "data": {
+          "id": "prj-PLATFORM",
+          "type": "projects"
+        }
+      }
+    }
+  }
+}

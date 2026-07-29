@@ -1,8 +1,14 @@
 # TFC/TFE Support Design
 
-**Status:** Proposed (revised)  
-**Date:** 2026-07-28  
+**Status:** Approved — implementing  
+**Date:** 2026-07-28 (revised 2026-07-29)  
 **Repo:** `terraform-rum-analysis-tools`
+
+## Goals (implementation drivers)
+
+1. **Spec-driven:** Behavior matches this design (scopes, raw state, report sections, partial failures).
+2. **Goal-driven:** Operators can answer RUM questions at org / project / workspace level with totals and per-provider breakdowns.
+3. **Task-driven:** Deliver via `docs/superpowers/plans/2026-07-28-tfc-tfe-support.md` tasks P0→P2.
 
 ## 1. Current state review
 

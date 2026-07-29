@@ -1,0 +1,9 @@
+{
+  "data": {
+    "id": "prj-PLATFORM",
+    "type": "projects",
+    "attributes": {
+      "name": "platform"
+    }
+  }
+}

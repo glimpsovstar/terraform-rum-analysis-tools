@@ -1,0 +1,37 @@
+{
+  "data": [
+    {
+      "id": "ws-B",
+      "type": "workspaces",
+      "attributes": {
+        "name": "prod-app"
+      },
+      "relationships": {
+        "project": {
+          "data": {
+            "id": "prj-PLATFORM",
+            "type": "projects"
+          }
+        }
+      }
+    }
+  ],
+  "included": [
+    {
+      "id": "prj-PLATFORM",
+      "type": "projects",
+      "attributes": {
+        "name": "platform"
+      }
+    }
+  ],
+  "meta": {
+    "pagination": {
+      "current-page": 2,
+      "prev-page": 1,
+      "next-page": null,
+      "total-pages": 2,
+      "total-count": 2
+    }
+  }
+}

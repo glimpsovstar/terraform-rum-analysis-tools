@@ -38,6 +38,8 @@ import json
 import argparse
 import pandas as pd
 
+from inventory import extract_inventory
+
 def load_state_file(state_file):
     """
     Loads and parses the Terraform state file.
@@ -63,33 +65,39 @@ def save_to_csv(resource_df, output_file):
 def extract_resources(state_data, exclude_tfe_vault=False, only_tfe_vault=False, debug=False):
     """
     Extracts managed resources from the Terraform state file.
-    """
-    resources = []
-    hashi_instances = 0
 
+    Uses the shared inventory extractor so counts stay aligned with rum_report.
+    """
+    inv = extract_inventory(
+        state_data,
+        hide_hashi=exclude_tfe_vault,
+        only_hashi=only_tfe_vault,
+    )
+    hashi_instances = 0
     for resource in state_data.get("resources", []):
-        if resource.get("mode") == "managed" and resource.get("type") not in ["terraform_data", "null_resource"]:
-            is_hashi_resource = resource["type"].startswith("tfe_") or resource["type"].startswith("vault_")
-            
-            if exclude_tfe_vault and is_hashi_resource:
-                continue
-            
-            if only_tfe_vault and not is_hashi_resource:
-                continue
-            
-            if is_hashi_resource:
-                hashi_instances += len(resource.get("instances", []))
-            
-            for instance in resource.get("instances", []):
-                resources.append({
-                    "Module": resource.get("module", "root"),
-                    "Resource Type": resource["type"],
-                    "Resource Name": resource["name"],
-                    "Provider": resource.get("provider", "unknown"),
-                    "Instance Count": 1
-                })
-    
-    return pd.DataFrame(resources), hashi_instances
+        if resource.get("mode") != "managed":
+            continue
+        rtype = resource.get("type", "")
+        if rtype in {"terraform_data", "null_resource"}:
+            continue
+        if rtype.startswith("tfe_") or rtype.startswith("vault_"):
+            hashi_instances += len(resource.get("instances", []))
+
+    if inv.empty:
+        return pd.DataFrame(
+            columns=["Module", "Resource Type", "Resource Name", "Provider", "Instance Count"]
+        ), hashi_instances
+
+    resource_df = pd.DataFrame(
+        {
+            "Module": inv["module"],
+            "Resource Type": inv["resource_type"],
+            "Resource Name": inv["resource_name"],
+            "Provider": inv["provider_raw"],
+            "Instance Count": inv["instance_count"],
+        }
+    )
+    return resource_df, hashi_instances
 
 def aggregate_resources(resource_df, hashi_instances, is_hashi_only, is_excluding_hashi):
     """

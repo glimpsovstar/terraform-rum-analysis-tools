@@ -1,0 +1,10 @@
+{
+  "data": {
+    "id": "sv-TESTSTATE",
+    "type": "state-versions",
+    "attributes": {
+      "hosted-state-download-url": "https://archivist.example.test/v1/object/raw-state",
+      "hosted-json-state-download-url": "https://archivist.example.test/v1/object/json-state"
+    }
+  }
+}

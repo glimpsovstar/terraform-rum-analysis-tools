@@ -108,6 +108,27 @@ def test_collect_inventory_records_errors_and_continues():
     assert errors[0]["workspace_id"] == "ws-B"
 
 
+def test_html_format_writes_dashboard(tmp_path, capsys):
+    out = tmp_path / "dash.html"
+    code = main(
+        [
+            "--scope",
+            "workspace",
+            "-f",
+            str(FIX / "sample_aws.tfstate"),
+            "--format",
+            "html",
+            "--output",
+            str(out),
+        ]
+    )
+    assert code == 0
+    assert out.exists()
+    text = out.read_text(encoding="utf-8")
+    assert "RUM" in text and "Findings" in text
+    assert "Wrote HTML report:" in capsys.readouterr().out
+
+
 def test_strict_exits_nonzero_on_partial_failure():
     client = MagicMock()
     client.download_current_state.side_effect = RuntimeError("no state")

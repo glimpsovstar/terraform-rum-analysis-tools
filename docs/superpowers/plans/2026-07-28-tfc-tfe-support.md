@@ -2,6 +2,8 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+**Status:** Implemented 2026-07-29 — Tasks 1–10 delivered (`rum_report.py` + modules + 26 pytest cases + README).
+
 **Goal:** Analyze RUM at workspace, project, or organization scope against HCP Terraform / TFE, and produce reports with totals plus per-provider / per-type / per-workspace (and per-project) breakdowns.
 
 **Architecture:** Discover workspaces for the chosen scope → download each workspace’s current raw state → normalize managed instances into a shared inventory table → aggregate reports and export. Local `-f` remains workspace-scope offline mode. Existing scripts keep deep single-state workflows via shared inventory helpers.
@@ -53,7 +55,7 @@
 **Interfaces:**
 - Produces: installable deps + fixtures for later tasks
 
-- [ ] **Step 1: Add dependency files**
+- [x] **Step 1: Add dependency files**
 
 ```text
 # requirements.txt

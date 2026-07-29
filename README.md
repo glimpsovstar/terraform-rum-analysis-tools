@@ -1,239 +1,150 @@
-# terraform-rum-analysis
-This repository contains tools that can be used to analyse Terraform's resources under management in a single workspace.
-There are 3 main scripts:
+# terraform-rum-analysis-tools
 
-`terraform_resource_extractor.py`:
+Tools to analyze Terraform **Resources Under Management (RUM)** from local state files or **HCP Terraform / Terraform Enterprise** at **workspace**, **project**, or **organization** scope.
 
-Purpose: Analyzes a Terraform state (.tfstate) file to extract and aggregate managed resources.
-Features:
-Extracts managed resources from the state file.
-Counts total resource instances, including those created with count or for_each.
-Lists unique resource types and their occurrences.
-Identifies providers used in the configuration.
-Usage: Run the script with the path to the Terraform state file as an argument to receive a structured summary of the managed resources.
-
-`extract_resource_type_stats.py`:
-
-Purpose: Generates statistics on resource types within a Terraform state file.
-Features:
-Parses the state file to identify all resource types.
-Counts the number of instances for each resource type.
-Provides a summary of resource distribution.
-Usage: Execute the script with the Terraform state file as input to obtain a breakdown of resource types and their instance counts.
-
-`temporary_intended_resources.py`:
-
-Purpose: Identifies resources in a Terraform state file that are intended to be temporary, based on specific naming conventions.
-Features:
-Searches for resource names containing keywords like "demo", "test", "temp", "tmp", and "example".
-Generates a list of these resources for review.
-Assists in managing and cleaning up ephemeral resources.
-Usage: Run the script with the state file as an argument to receive a list of resources that match the temporary naming patterns.
-These scripts are designed to assist in analyzing and managing resources within Terraform state files, providing insights into resource utilization and aiding in the identification of temporary or test resources.
-
-
-## Terraform Resource Extractor (`terraform_resource_extractor.py`)
-The `terraform_resource_extractor.py` script is a **Terraform state analysis tool** that extracts, counts, and aggregates **managed resources** from a Terraform state (`.tfstate`) file. It helps Terraform users inspect **resource instances, unique resource types, and provider details** in a structured format.
-
-### 🛠 Features
-- **Extract managed resources** from a Terraform state file.
-- **Count total resource instances** (including those created with `count` or `for_each`).
-- **List unique resource types** (e.g., `aws_instance`, `aws_s3_bucket`).
-- **Aggregate and summarize resources** to provide insights.
-- **Supports debugging mode** to compare instance counts with `jq`.
-
----
-
-### 📦 Installation Requirements
-This script requires **Python 3.x** and the `pandas` library. Install the dependencies using:
+## Install
 
 ```bash
-pip install pandas
+pip install -r requirements.txt
+```
 
-## Terraform Resource Extractor (`terraform_resource_extractor.py`)
-
-The `terraform_resource_extractor.py` script is a **Terraform state analysis tool** that extracts, counts, and aggregates **managed resources** from a Terraform state (`.tfstate`) file. It helps Terraform users inspect **resource instances, unique resource types, and provider details** in a structured format.
-
----
-
-### 📦 Installation Requirements
-
-This script requires **Python 3.x** and the `pandas` library. Install the dependencies using:
+For development / tests:
 
 ```bash
-pip install pandas
+pip install -r requirements-dev.txt
+pytest -v
 ```
 
----
+## Primary tool: `rum_report.py`
 
-## 🚀 Usage
+Produces totals and breakdowns (per provider, resource type, workspace, and project).
 
-Run the script using Python and specify the Terraform state file (`.tfstate`) you want to analyze.
-
----
-
-### 1️⃣ Extract & Display Managed Resources (Default Mode)
+### Local workspace (offline)
 
 ```bash
-python terraform_resource_extractor.py -f terraform.tfstate
+python3 rum_report.py --scope workspace -f terraform.tfstate
+python3 rum_report.py --scope workspace -f terraform.tfstate --format json
 ```
 
-🔹 **Outputs a structured list** of all managed resources, including:
+### Remote scopes (TFC / TFE)
 
-- **Module** (Terraform module where the resource is defined)
-- **Resource Type** (e.g., `aws_instance`, `google_compute_instance`)
-- **Resource Name** (Terraform name of the resource)
-- **Provider** (Cloud provider)
-- **Instance Count** (Number of instances)
-
----
-
-### 2️⃣ 🔹 **Recommended Mode: Show Aggregated Resource Summary (**\`\`**)**
+Set a token (preferred via env):
 
 ```bash
-python terraform_resource_extractor.py -f terraform.tfstate -A
+export TFE_TOKEN=...                 # required for remote
+export TFE_HOSTNAME=app.terraform.io # optional; use your TFE host for Enterprise
+export TFC_ORGANIZATION=my-org       # optional defaults
 ```
 
-✅ **Recommended for most users** as it provides **high-level insights**.\
-🔹 **Outputs summary statistics**, including:
-
-- **Total instances**
-- **Total unique resources**
-- **Unique resource types**
-- **Most common resource types & names**
-
-#### Example Output:
-
-```
-📊 Aggregate Information:
-🔹 Total number of resource instances: 47
-🔹 Total number of unique resources: 12
-🔹 Total number of unique resource types: 5
-
-🔹 Unique Resource Types:
-aws_instance          23
-aws_s3_bucket         12
-aws_security_group     8
-...
-
-🔹 Unique Resource Names:
-web_server            10
-db_instance            5
-...
-```
-
----
-
-### 3️⃣ Count Total Resource Instances (`-n`)
+**Workspace**
 
 ```bash
-python terraform_resource_extractor.py -f terraform.tfstate -n
+python3 rum_report.py --scope workspace \
+  --organization my-org --workspace prod-net
 ```
 
-🔹 **Outputs only the total number** of resource instances across all types.
-
-#### Example Output:
-
-```
-Total number of resource instances: 47
-```
-
----
-
-### 4️⃣ Enable Debug Mode (`-d`)
+**Project**
 
 ```bash
-python terraform_resource_extractor.py -f terraform.tfstate -n -d
+python3 rum_report.py --scope project \
+  --organization my-org --project platform \
+  --format json --output rum-platform
 ```
 
-🔹 **Compares Python output with ****\`\`**** expected values**, ensuring accuracy.
-
-#### Example Output:
-
-```
-🔍 DEBUG: Expected jq output (from Python simulation): 47
-🔍 DEBUG: Total resource instances counted (flattened): 47
-```
-
----
-
-### 5️⃣ Exclude HashiCorp-Related Resources (`-H`)
+**Organization**
 
 ```bash
-python terraform_resource_extractor.py -f terraform.tfstate -H
+python3 rum_report.py --scope organization \
+  --organization my-org \
+  --concurrency 8
 ```
 
-🔹 **Excludes resources related to HashiCorp services** (e.g., `tfe_`, `vault_`).
+### Report contents
+
+- **Totals** — managed instances, unique types/providers, workspaces succeeded/failed  
+- **By provider** — instance counts and %  
+- **By resource type** — instance counts and %  
+- **By workspace** — instance counts  
+- **By project** — when project metadata is available (org/project runs)  
+- **Errors** — workspaces that failed (no state, auth, etc.)
+
+Managed-resource rules match the historical extractor: `mode == managed`, excluding `null_resource` and `terraform_data`.
+
+### Useful flags
+
+| Flag | Purpose |
+|------|---------|
+| `--format table\|json\|csv` | Output style (default `table`) |
+| `--output PATH` | Write JSON/CSV artifacts |
+| `--concurrency N` | Parallel state downloads (default 5) |
+| `--max-workspaces N` | Cap workspaces (sampling/debug) |
+| `--strict` | Exit non-zero if any workspace fails |
+| `-H` / `-Ho` | Hide or only show `tfe_` / `vault_` resources |
+| `--hostname` | TFE hostname (default `app.terraform.io`) |
+| `--workspace-id` / `--project-id` | Skip name lookup |
+
+Partial failures on project/org runs are recorded and the report continues unless `--strict` is set. Exit code `1` if zero workspaces succeed.
+
+### Permissions
+
+The API token needs permission to:
+
+- List workspaces in the organization (and read projects for project scope)
+- Read each target workspace
+- Download current state versions (`hosted-state-download-url`)
+
+### Security notes
+
+- Prefer `TFE_TOKEN` over `--token` (shell history / process list).
+- State files contain secrets; downloads stay in memory unless you export inventory/report files.
+- For TFE with custom CAs, configure trust via the usual Python/`SSL_CERT_FILE` mechanisms.
+
+Design details: [`docs/superpowers/specs/2026-07-28-tfc-tfe-support-design.md`](docs/superpowers/specs/2026-07-28-tfc-tfe-support-design.md)
 
 ---
 
-### 6️⃣ Only Show HashiCorp-Related Resources (`-Ho`)
+## Legacy single-state scripts
+
+These remain for deep dives on one state file. Counting is shared with `rum_report` via `inventory.py`.
+
+### `terraform_resource_extractor.py`
 
 ```bash
-python terraform_resource_extractor.py -f terraform.tfstate -Ho
+python3 terraform_resource_extractor.py -f terraform.tfstate
+python3 terraform_resource_extractor.py -f terraform.tfstate -A
+python3 terraform_resource_extractor.py -f terraform.tfstate -n
+python3 terraform_resource_extractor.py -f terraform.tfstate -G
+python3 terraform_resource_extractor.py -f terraform.tfstate -o output.csv
+python3 terraform_resource_extractor.py -f terraform.tfstate -H    # hide tfe_/vault_
+python3 terraform_resource_extractor.py -f terraform.tfstate -Ho   # only tfe_/vault_
 ```
 
-🔹 **Filters to show only HashiCorp-managed resources** (e.g., `tfe_`, `vault_`).
-
----
-
-### 7️⃣ Group Resources by Module & Type (`-G`)
+### `extract_resource_type_stats.py`
 
 ```bash
-python terraform_resource_extractor.py -f terraform.tfstate -G
+python3 extract_resource_type_stats.py -f terraform.tfstate -r aws_instance
+python3 extract_resource_type_stats.py -f terraform.tfstate -r aws_instance -D
 ```
 
-🔹 **Outputs a grouped view** of resources, organized by:
+### `temporary_intended_resources.py`
 
-- **Module**
-- **Resource Type**
-- **Resource Name**
-- **Provider**
-
-#### Example Output:
-
-```
-📊 Grouped Resource Information:
-Module         Resource Type        Resource Name     Provider              Instance Count
-------------------------------------------------------------------------------------------------
-root           aws_instance         web_server       aws                   3
-module.db      aws_rds_instance     database         aws                   2
-module.network aws_vpc              vpc_main         aws                   1
-...
-```
-
----
-
-### 8️⃣ Save Extracted Data to a CSV File
+Finds resources whose attribute `name` contains demo/test/temp/tmp/example (candidates for ephemeral cleanup).
 
 ```bash
-python terraform_resource_extractor.py -f terraform.tfstate -o output.csv
+python3 temporary_intended_resources.py terraform.tfstate
+python3 temporary_intended_resources.py terraform.tfstate -D
 ```
-
-🔹 Saves the extracted resource list to a **CSV file** for further analysis.
 
 ---
 
+## jq parity check
 
-
-## 📝 Example: Comparing with jq
-
-The script's **total instance count** should match the following `jq` command:
+Managed instance counts should match:
 
 ```bash
 cat terraform.tfstate | jq '[ .resources[] | select(.mode == "managed") | select(.type == "terraform_data" or .type == "null_resource" | not) | .instances | flatten[] ] | length'
 ```
 
-Use the `-d` flag to **validate Terraform state parsing**.
-
----
-
-## 💡 When to Use This Script?
-
-✅ **Understanding Terraform resource structure** in a large state file.\
-✅ **Verifying instance counts** before applying changes.\
-✅ **Detecting duplicate or unnecessary resources**.\
-✅ **Comparing Terraform infrastructure** across deployments.\
-✅ **Exporting Terraform resource inventory for audits and reporting.**
-
-
+```bash
+python3 rum_report.py --scope workspace -f terraform.tfstate --format json | jq '.totals.instances'
+```

@@ -1,6 +1,6 @@
 # TFC/TFE Support Design
 
-**Status:** Approved — implementing  
+**Status:** Implemented (P0–P2)  
 **Date:** 2026-07-28 (revised 2026-07-29)  
 **Repo:** `terraform-rum-analysis-tools`
 
@@ -9,6 +9,18 @@
 1. **Spec-driven:** Behavior matches this design (scopes, raw state, report sections, partial failures).
 2. **Goal-driven:** Operators can answer RUM questions at org / project / workspace level with totals and per-provider breakdowns.
 3. **Task-driven:** Deliver via `docs/superpowers/plans/2026-07-28-tfc-tfe-support.md` tasks P0→P2.
+
+## Implementation map
+
+| Spec area | Code |
+|-----------|------|
+| Inventory + provider normalization | `inventory.py` |
+| TFC/TFE API client | `tfc_client.py` |
+| Scope discovery | `discover.py` |
+| Totals / breakdowns / export | `report.py` |
+| Primary CLI | `rum_report.py` |
+| Shared counts in legacy extractor | `terraform_resource_extractor.py` |
+| Tests | `tests/test_*.py` |
 
 ## 1. Current state review
 

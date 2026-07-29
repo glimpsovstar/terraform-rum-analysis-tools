@@ -35,17 +35,12 @@ def build_report(
 ) -> dict[str, Any]:
     df = inventory_df if inventory_df is not None else pd.DataFrame()
     total_instances = int(df["instance_count"].sum()) if not df.empty else 0
-    succeeded = (
-        int(df["workspace_id"].nunique())
-        if not df.empty and "workspace_id" in df.columns and df["workspace_id"].notna().any()
-        else (int(df["workspace_name"].nunique()) if not df.empty else 0)
-    )
-    # Prefer counting succeeded from distinct workspace identifiers present in inventory
-    if not df.empty:
-        if df["workspace_id"].notna().any():
-            succeeded = int(df["workspace_id"].nunique())
-        else:
-            succeeded = int(df["workspace_name"].nunique())
+    if df.empty:
+        succeeded = 0
+    elif df["workspace_id"].notna().any():
+        succeeded = int(df["workspace_id"].nunique())
+    else:
+        succeeded = int(df["workspace_name"].nunique())
 
     by_provider = []
     if not df.empty:

@@ -73,12 +73,24 @@ python3 rum_report.py --scope organization \
 
 Managed-resource rules match the historical extractor: `mode == managed`, excluding `null_resource` and `terraform_data`.
 
+### HTML dashboard report
+
+Generate a self-contained offline HTML dashboard (KPIs, breakdowns, expandable findings, searchable inventory):
+
+```bash
+python3 rum_report.py --scope workspace -f terraform.tfstate --format html --output rum-dashboard.html
+python3 rum_report.py --scope organization --organization my-org --format html
+# defaults to ./rum-report.html when --output is omitted
+```
+
+Open the file in a browser. Click a breakdown bar to filter inventory; expand findings for supporting rows. No network/CDN required.
+
 ### Useful flags
 
 | Flag | Purpose |
 |------|---------|
-| `--format table\|json\|csv` | Output style (default `table`) |
-| `--output PATH` | Write JSON/CSV artifacts |
+| `--format table\|json\|csv\|html` | Output style (default `table`) |
+| `--output PATH` | Write JSON/CSV/HTML artifacts |
 | `--concurrency N` | Parallel state downloads (default 5) |
 | `--max-workspaces N` | Cap workspaces (sampling/debug) |
 | `--strict` | Exit non-zero if any workspace fails |

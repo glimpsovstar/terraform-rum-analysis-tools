@@ -136,6 +136,11 @@ ENV/
 env.bak/
 venv.bak/
 
+# Generated RUM HTML dashboards (local runs)
+rum-report.html
+rum-dashboard.html
+*.rum.html
+
 # Spyder project settings
 .spyderproject
 .spyproject

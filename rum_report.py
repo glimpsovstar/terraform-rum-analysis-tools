@@ -8,10 +8,11 @@ Scopes:
   - organization: all workspaces in an organization
 
 Examples:
-  python rum_report.py --scope workspace -f terraform.tfstate
-  python rum_report.py --scope workspace --organization ORG --workspace WS
-  python rum_report.py --scope project --organization ORG --project platform
-  python rum_report.py --scope organization --organization ORG --format json
+  python3 rum_report.py --scope workspace -f terraform.tfstate
+  python3 rum_report.py --scope workspace --organization ORG --workspace WS
+  python3 rum_report.py --scope project --organization ORG --project platform
+  python3 rum_report.py --scope organization --organization ORG --format json
+  python3 rum_report.py --scope workspace -f terraform.tfstate --format html --output rum.html
 """
 
 from __future__ import annotations
@@ -28,6 +29,7 @@ import pandas as pd
 
 from discover import discover_workspaces
 from inventory import extract_inventory
+from html_report import write_html_report
 from report import build_report, render_table, write_inventory_csv, write_json
 from tfc_client import TfcApiError, TfcClient
 
@@ -89,14 +91,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--format",
-        choices=("table", "json", "csv"),
+        choices=("table", "json", "csv", "html"),
         default="table",
-        help="Output format (default: table).",
+        help="Output format (default: table). Use html for a dashboard file.",
     )
     parser.add_argument(
         "--output",
         default=None,
-        help="Write report JSON and/or inventory CSV to this path prefix or file.",
+        help="Write report artifacts to this path prefix or file (required intent for html; defaults to rum-report.html).",
     )
     parser.add_argument(
         "-H",
@@ -216,8 +218,10 @@ def _write_outputs(
     inventory_df: pd.DataFrame,
     output: str,
     fmt: str,
-) -> None:
+) -> Path | None:
     path = Path(output)
+    if fmt == "html" or path.suffix.lower() == ".html":
+        return write_html_report(path if path.suffix else Path(f"{output}.html"), report, inventory_df)
     if fmt == "csv" or path.suffix.lower() == ".csv":
         write_inventory_csv(inventory_df, path if path.suffix else Path(f"{output}.csv"))
         if path.suffix.lower() == ".csv":
@@ -225,18 +229,19 @@ def _write_outputs(
         else:
             summary_path = Path(f"{output}.summary.json")
         write_json(report, summary_path)
-        return
+        return summary_path
     if fmt == "json" or path.suffix.lower() == ".json":
         write_json(report, path if path.suffix else Path(f"{output}.json"))
         csv_path = path.with_suffix(".inventory.csv") if path.suffix else Path(f"{output}.inventory.csv")
         write_inventory_csv(inventory_df, csv_path)
-        return
+        return Path(path if path.suffix else f"{output}.json")
     # table + output prefix: write both
     write_json(report, Path(f"{output}.json") if not path.suffix else path)
     write_inventory_csv(
         inventory_df,
         Path(f"{output}.inventory.csv") if not path.suffix else path.with_suffix(".inventory.csv"),
     )
+    return None
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -311,7 +316,15 @@ def main(argv: list[str] | None = None) -> int:
         project=args.project or args.project_id,
     )
 
-    if args.output:
+    if args.format == "html":
+        output = args.output or "rum-report.html"
+        written = _write_outputs(report, inventory_df, output, "html")
+        print(f"Wrote HTML report: {written}")
+        print(
+            f"Instances={report['totals']['instances']} "
+            f"findings available in dashboard · open the HTML file in a browser"
+        )
+    elif args.output:
         _write_outputs(report, inventory_df, args.output, args.format)
 
     if args.format == "json":
@@ -327,7 +340,7 @@ def main(argv: list[str] | None = None) -> int:
                 print(inventory_df.to_csv(index=False).rstrip("\n"))
         else:
             print(render_table(report))
-    else:
+    elif args.format == "table":
         print(render_table(report))
 
     if args.file:

@@ -83,3 +83,32 @@ def test_api_error_on_401():
     with patch("tfc_client.urlopen", return_value=_resp(b'{"errors":[]}', status=401)):
         with pytest.raises(TfcApiError, match="401"):
             client.get_workspace_id("o", "w")
+
+
+def test_get_workspace_maps_project():
+    body = (FIX / "workspace_show.json").read_bytes()
+    client = TfcClient("app.terraform.io", "token")
+    with patch("tfc_client.urlopen", return_value=_resp(body)):
+        ws = client.get_workspace("my-org", "prod-net")
+    assert ws["id"] == "ws-A"
+    assert ws["name"] == "prod-net"
+    assert ws["project_id"] == "prj-PLATFORM"
+
+
+def test_get_workspace_id_unexpected_payload():
+    client = TfcClient("app.terraform.io", "token")
+    with patch("tfc_client.urlopen", return_value=_resp(b'{}')):
+        with pytest.raises(TfcApiError, match="Unexpected workspace"):
+            client.get_workspace_id("o", "w")
+
+
+def test_download_empty_url():
+    payload = {
+        "data": {
+            "attributes": {"hosted-state-download-url": ""}
+        }
+    }
+    client = TfcClient("app.terraform.io", "token")
+    with patch("tfc_client.urlopen", return_value=_resp(json.dumps(payload).encode())):
+        with pytest.raises(TfcApiError, match="empty download URL"):
+            client.download_current_state("ws-A")

@@ -73,3 +73,18 @@ def test_discover_organization():
 def test_discover_requires_org():
     with pytest.raises(ValueError, match="organization"):
         discover_workspaces(MagicMock(), "organization")
+
+
+def test_discover_unsupported_scope():
+    with pytest.raises(ValueError, match="Unsupported scope"):
+        discover_workspaces(MagicMock(), "region")
+
+
+def test_discover_workspace_requires_org_and_name():
+    with pytest.raises(ValueError, match="workspace scope requires"):
+        discover_workspaces(MagicMock(), "workspace", organization="o")
+
+
+def test_discover_project_requires_project():
+    with pytest.raises(ValueError, match="project scope requires"):
+        discover_workspaces(MagicMock(), "project", organization="o")

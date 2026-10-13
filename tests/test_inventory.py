@@ -9,6 +9,7 @@ FIX = Path(__file__).parent / "fixtures"
 def test_normalize_provider():
     assert normalize_provider('provider["registry.terraform.io/hashicorp/aws"]') == "hashicorp/aws"
     assert normalize_provider('provider["registry.terraform.io/hashicorp/azurerm"].prod') == "hashicorp/azurerm"
+    assert normalize_provider('provider["aws"]') == "aws"
     assert normalize_provider("unknown") == "unknown"
     assert normalize_provider("") == "unknown"
 

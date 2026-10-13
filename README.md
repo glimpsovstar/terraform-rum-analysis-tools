@@ -13,7 +13,24 @@ For development / tests:
 ```bash
 pip install -r requirements-dev.txt
 pytest -v
+pytest --cov=. --cov-report=term-missing
 ```
+
+CI runs the same suite on every push and pull request (`.github/workflows/test.yml`).
+
+### Testing policy
+
+Every new feature or behavior change **must** ship with tests in `tests/` before it is considered done:
+
+| You added… | Add tests that… |
+|------------|-----------------|
+| Inventory / counting logic | Assert instance totals, exclusions, provider normalization |
+| TFC/TFE API / discovery | Mock HTTP; cover success, pagination, and error payloads |
+| CLI flags / env handling | Exercise local `-f`, remote env defaults, and mutex errors |
+| A report format (table/json/csv/html) | Check output structure and that files are written |
+| A new OSS script | Cover the happy path, empty/missing input, and CLI flags |
+
+Do not merge code that has no corresponding test. Prefer fixtures under `tests/fixtures/` over live TFC/TFE calls.
 
 ## Primary tool: `rum_report.py`
 

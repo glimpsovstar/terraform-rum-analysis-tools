@@ -21,9 +21,12 @@ Produces totals and breakdowns (per provider, resource type, workspace, and proj
 
 ### Local workspace (offline)
 
+A local `.tfstate` is enough. `--file` wins over `TFC_WORKSPACE` / `TFC_PROJECT` in the environment, so you can analyze a downloaded state file even if TFC env vars are set.
+
 ```bash
 python3 rum_report.py --scope workspace -f terraform.tfstate
 python3 rum_report.py --scope workspace -f terraform.tfstate --format json
+python3 terraform_resource_extractor.py -f terraform.tfstate -A
 ```
 
 ### Remote scopes (TFC / TFE)

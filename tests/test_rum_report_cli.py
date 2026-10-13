@@ -42,6 +42,52 @@ def test_local_and_remote_mutex():
     assert code == 2
 
 
+def test_local_file_ignores_tfc_workspace_env(monkeypatch, capsys):
+    monkeypatch.setenv("TFC_ORGANIZATION", "my-org")
+    monkeypatch.setenv("TFC_WORKSPACE", "prod-net")
+    monkeypatch.setenv("TFC_PROJECT", "platform")
+    code = main(
+        [
+            "--scope",
+            "workspace",
+            "-f",
+            str(FIX / "sample_aws.tfstate"),
+            "--format",
+            "json",
+        ]
+    )
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["totals"]["instances"] == 2
+    assert payload["meta"]["scope"] == "workspace"
+
+
+def test_remote_run_still_uses_tfc_workspace_env(monkeypatch):
+    monkeypatch.setenv("TFC_ORGANIZATION", "my-org")
+    monkeypatch.setenv("TFC_WORKSPACE", "prod-net")
+    monkeypatch.setenv("TFE_TOKEN", "t")
+    client = MagicMock()
+    with patch("rum_report.TfcClient", return_value=client), patch(
+        "rum_report.collect_inventory", return_value=(__import__("pandas").DataFrame(), [])
+    ) as collect:
+        code = main(["--scope", "workspace", "--format", "json"])
+    assert code == 1  # zero workspaces succeeded (empty inventory)
+    collect.assert_called_once()
+    assert collect.call_args.kwargs["organization"] == "my-org"
+    assert collect.call_args.kwargs["workspace"] == "prod-net"
+
+
+def test_no_args_mentions_local_file(monkeypatch, capsys):
+    monkeypatch.delenv("TFE_TOKEN", raising=False)
+    monkeypatch.delenv("TFC_ORGANIZATION", raising=False)
+    monkeypatch.delenv("TFC_WORKSPACE", raising=False)
+    code = main([])
+    assert code == 2
+    err = capsys.readouterr().err
+    assert "--file" in err
+    assert "TFE_TOKEN" in err
+
+
 def test_collect_inventory_org_scope_rollups():
     client = MagicMock()
     aws = json.loads((FIX / "sample_aws.tfstate").read_text(encoding="utf-8"))

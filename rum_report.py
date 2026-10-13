@@ -49,19 +49,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("-f", "--file", help="Local Terraform state file (.tfstate).")
     parser.add_argument(
         "--organization",
-        default=os.environ.get("TFC_ORGANIZATION"),
-        help="TFC/TFE organization name (or TFC_ORGANIZATION).",
+        default=None,
+        help="TFC/TFE organization name (or TFC_ORGANIZATION for remote runs).",
     )
     parser.add_argument(
         "--workspace",
-        default=os.environ.get("TFC_WORKSPACE"),
-        help="Workspace name (or TFC_WORKSPACE).",
+        default=None,
+        help="Workspace name (or TFC_WORKSPACE for remote runs).",
     )
     parser.add_argument("--workspace-id", default=None, help="Workspace ID (ws-...).")
     parser.add_argument(
         "--project",
-        default=os.environ.get("TFC_PROJECT"),
-        help="Project name (or TFC_PROJECT).",
+        default=None,
+        help="Project name (or TFC_PROJECT for remote runs).",
     )
     parser.add_argument("--project-id", default=None, help="Project ID (prj-...).")
     parser.add_argument(
@@ -111,6 +111,22 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Only include tfe_ and vault_ resources.",
     )
     return parser.parse_args(argv)
+
+
+def apply_remote_env_defaults(args: argparse.Namespace) -> None:
+    """Fill remote identity from env only when CLI flags were omitted.
+
+    Local ``--file`` analysis must ignore ``TFC_WORKSPACE`` / ``TFC_PROJECT`` so
+    operators can analyze a downloaded state file with TFC env vars still set.
+    """
+    if args.organization is None:
+        args.organization = os.environ.get("TFC_ORGANIZATION")
+    if args.file:
+        return
+    if args.workspace is None:
+        args.workspace = os.environ.get("TFC_WORKSPACE")
+    if args.project is None:
+        args.project = os.environ.get("TFC_PROJECT")
 
 
 def _fetch_one(
@@ -226,28 +242,18 @@ def _write_outputs(
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
 
-    remote_identity = any(
-        [
-            args.workspace,
-            args.workspace_id,
-            args.project,
-            args.project_id,
-            args.scope in {"project", "organization"},
-        ]
+    # Mutex uses CLI flags only — env defaults are applied after this check.
+    explicit_remote_target = bool(
+        args.workspace or args.workspace_id or args.project or args.project_id
     )
-    # Local file cannot be combined with remote workspace/project targeting.
-    if args.file and (args.workspace or args.workspace_id or args.project or args.project_id):
+    if args.file and (explicit_remote_target or args.scope in {"project", "organization"}):
         print(
             "❌ Error: Provide a local --file or remote workspace/project/org identity, not both.",
             file=sys.stderr,
         )
         return 2
-    if args.file and args.organization and remote_identity:
-        print(
-            "❌ Error: Provide a local --file or remote workspace/project/org identity, not both.",
-            file=sys.stderr,
-        )
-        return 2
+
+    apply_remote_env_defaults(args)
 
     hide_hashi = args.hide_tfe_vault
     only_hashi = args.only_tfe_vault
@@ -270,7 +276,11 @@ def main(argv: list[str] | None = None) -> int:
         else:
             token = resolve_token(args.token)
             if not token:
-                print("❌ Error: Remote analysis requires TFE_TOKEN or --token.", file=sys.stderr)
+                print(
+                    "❌ Error: Provide --file for a local state file, "
+                    "or TFE_TOKEN/--token plus organization/workspace for TFC/TFE.",
+                    file=sys.stderr,
+                )
                 return 2
             if args.scope in {"project", "organization"} and not args.organization:
                 print("❌ Error: --organization is required for this scope.", file=sys.stderr)

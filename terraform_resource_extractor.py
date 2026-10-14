@@ -130,6 +130,7 @@ def group_resources(resource_df):
     grouped_df = resource_df.groupby(["Module", "Resource Type", "Resource Name", "Provider"]).sum()
     print("\n📊 Grouped Resource Information:")
     print(grouped_df.to_string())
+    return grouped_df
 
 def compare_with_jq(state_data, debug=False):
     """

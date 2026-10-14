@@ -77,6 +77,38 @@ def test_remote_run_still_uses_tfc_workspace_env(monkeypatch):
     assert collect.call_args.kwargs["workspace"] == "prod-net"
 
 
+def test_local_file_rejects_non_workspace_scope():
+    code = main(
+        [
+            "--scope",
+            "organization",
+            "-f",
+            str(FIX / "sample_aws.tfstate"),
+        ]
+    )
+    assert code == 2
+
+
+def test_local_json_output_file(tmp_path):
+    out = tmp_path / "report.json"
+    code = main(
+        [
+            "--scope",
+            "workspace",
+            "-f",
+            str(FIX / "sample_aws.tfstate"),
+            "--format",
+            "json",
+            "--output",
+            str(out),
+        ]
+    )
+    assert code == 0
+    assert out.exists()
+    payload = json.loads(out.read_text(encoding="utf-8"))
+    assert payload["totals"]["instances"] == 2
+
+
 def test_no_args_mentions_local_file(monkeypatch, capsys):
     monkeypatch.delenv("TFE_TOKEN", raising=False)
     monkeypatch.delenv("TFC_ORGANIZATION", raising=False)
